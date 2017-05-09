@@ -51,8 +51,9 @@ func (t *Template) Render(data interface{}) (*xlsx.File, error) {
 }
 
 func (t *Template) renderRange(report *xlsx.File, data interface{}) error {
-	tags := ""
 
+	// collects information about rows/cells what are part of {{range}}{{end.}}
+	tags := ""
 	for s := range report.Sheets {
 		for r := range report.Sheets[s].Rows {
 		rows:
@@ -84,12 +85,16 @@ func (t *Template) renderRange(report *xlsx.File, data interface{}) error {
 		}
 	}
 
+	// Done. variable tags holds information about ranges.
+
 	funcMap := template.FuncMap{
 
 		"fdate": func(s string, t time.Time) string { return t.Format(s) },
 	}
 
 	debugf("%s\n", tags)
+
+	// пропускаем выделенные тэги через шаблонизатор.
 	tmp := template.Must(template.New("report").Funcs(funcMap).Parse(tags))
 
 	buf := bytes.NewBuffer(nil)
@@ -102,6 +107,9 @@ func (t *Template) renderRange(report *xlsx.File, data interface{}) error {
 		return err
 	}
 
+	// lines содержит один или несколько блоков ##begin:N.... ##end разбитые по строкам.
+	// строки между блоками ##begin:N...##end содержит строки, которые необходимо вставить
+	// вместо строки где встретился {{range}}...{{end}}
 	lines := strings.Split(buf.String(), tagSeparator)
 
 	if debug {
@@ -110,66 +118,105 @@ func (t *Template) renderRange(report *xlsx.File, data interface{}) error {
 		}
 	}
 
+	// теперь необходимо, заменить одну строку содержащую {{range}}..{{end}}
+	// несколькими аналогичными строками, в которые затем будут вписанные данные
+	// из lines. Для этого используется содержимое lines, а именно кол-во строк
+	// между строками обозначающими начало и конец блока ##begin:N... ##end
+
 	i := 0
 	offset := 0
 	for ; i < len(lines); i++ {
 
 		debugf("%s\n", lines[i])
-		if strings.HasPrefix(lines[i], "##begin:") {
-			// rangeRowNum хранит номер строки из шаблона где находится {{range}}{{end}}
-			rangeRowNum, err := strconv.Atoi(lines[i][8:])
+		if !strings.HasPrefix(lines[i], "##begin:") {
+			continue
+		}
+
+		// найдено начало блока ##begin:N
+		// rangeRowNum хранит номер строки из шаблона где находится {{range}}{{end}}
+		rangeRowNum, err := strconv.Atoi(lines[i][8:])
+		if err != nil {
+			return err
+		}
+
+		rangeRowNum += offset
+
+		// теперь двигаемся до ближайшей строки ##end
+		// cnt - количество строк в блоке в результате генерации блока {{range}}{{end}}
+		// Внимание: предполагается, что ##end будет обязательно, ведь иначе
+		// при генерации шаблона будет ошибка, если не встретится {{end}}
+		cnt := 0
+		for j := i + 1; j < len(lines); j++ {
+			if strings.HasPrefix(lines[j], "##end") {
+				cnt = j - i - 1
+				break
+			}
+		}
+
+		if cnt == 0 {
+			// если генерация {{range}}{{end}} дала ноль записей, то есть после
+			// строчки ##begin:N следующей сразу ##end, тогда необходимо из формируемого excel файла
+			// удалить строчку содержащую тэги {{range}}{{end}}
+			debugf("del row: %d, offset:%d\n", rangeRowNum, offset)
+			// значит надо удалить строчку с {{range}}
+			err = delRow(report, 0, rangeRowNum+offset)
 			if err != nil {
 				return err
 			}
+			offset--
 
-			cnt := 0
-			for j := i + 1; j < len(lines); j++ {
-				if strings.HasPrefix(lines[j], "##end") {
-					cnt = j - i - 1
-					break
-				}
+			// переходим к обработке следующего блока ##begin:N...##end
+			continue
+		}
+
+		debugf("amount of rows to insert %d\n", cnt)
+
+		// если количество строк которые сформированы шаблонизатором для
+		// {{range}}{{end}} больше нуля, то копируем все строки до начала
+		// строки {{range}}{{end}}, потому что если не будет данных
+		// нам не надо создавать пустую строчку без данных
+		if err := insertRows(report, 0, rangeRowNum+offset, cnt-1, report.Sheets[0].Rows[rangeRowNum+offset]); err != nil {
+			return err
+		}
+
+		offset += cnt - 1
+
+		// теперь необходимо в каждой вставленной строке, заменить ячейки
+		// данными которые находятся между ##begin:N...##end
+		// сейчас мы находимся
+
+		l := 0
+		for k := i + 1; k < i+1+cnt; k++ {
+			// k - индекс в массиве lines между строками ##begin и ##end
+			cval := parseRangeLine(lines[k])
+			fmt.Printf("%v, rangeRowNum=%d\n", cval, rangeRowNum)
+
+			for c, str := range cval {
+				setValue(report, 0, rangeRowNum+l, c, str)
 			}
-
-			if cnt == 0 {
-				debugf("del row: %d, offset:%d\n", rangeRowNum, offset)
-				// значит надо удалить строчку с {{range}}
-				err = delRow(report, 0, rangeRowNum+offset)
-				if err != nil {
-					return err
-				}
-				offset--
-				continue
-			}
-
-			debugf("amount of rows to insert %d\n", cnt)
-
-			// копируем все строки до начала строки range, потому что если не будет данных
-			// нам не надо создавать пустую строчку без данных
-			if err := insertRows(report, 0, rangeRowNum+offset, cnt-1, report.Sheets[0].Rows[rangeRowNum+offset]); err != nil {
-				return err
-			}
-
-			offset += cnt - 1
-
-			/*		// двигаемся до конца сгенерированного блока
-					i++
-					for ; i < len(lines); i++ {
-						if strings.HasPrefix(lines[i], "##end") {
-
-							break
-						}
-						// если есть строка которую надо добавить как результат range
-						// добавляем одну строку
-						debugf("append table row: %d\n", i)
-						/*				if err := appendRows(report, result, 0, rangeRowNum, rangeRowNum+1, 0); err != nil {
-
-										return nil, err
-									}*/
-
-			// надо ее распарсить и присворить значениям новой добавленной строки
-			//}
+			l++
 
 		}
+		// первую строку надо пропустить, там будет ##begin:N
+
+		/*		// двигаемся до конца сгенерированного блока
+				i++
+				for ; i < len(lines); i++ {
+					if strings.HasPrefix(lines[i], "##end") {
+
+						break
+					}
+					// если есть строка которую надо добавить как результат range
+					// добавляем одну строку
+					debugf("append table row: %d\n", i)
+					/*				if err := appendRows(report, result, 0, rangeRowNum, rangeRowNum+1, 0); err != nil {
+
+									return nil, err
+								}*/
+
+		// надо ее распарсить и присворить значениям новой добавленной строки
+		//}
+
 	}
 
 	return err
@@ -196,6 +243,7 @@ func (t *Template) renderStatic(report *xlsx.File, data interface{}) error {
 				if !(strings.Contains(val, "{{") && strings.Contains(val, "}}")) {
 					continue
 				}
+				println("static cell format: r, c, type", r, c, report.Sheets[s].Cell(r, c).Type())
 
 				if strings.Contains(val, "range") {
 					debugf("range found: %d:%d:%d\n", s, r, c)
@@ -242,26 +290,9 @@ func (t *Template) renderStatic(report *xlsx.File, data interface{}) error {
 
 		str := line[closeIdx+2:] //##0:1:1##Привет {{.Name}}
 
-		numberFormat := report.Sheets[0].Cell(r, c).GetNumberFormat()
-		if val, err := strconv.ParseFloat(str, 10); err == nil {
-			report.Sheets[s].Cell(r, c).SetFloat(val)
-			report.Sheets[s].Cell(r, c).NumFmt = numberFormat
-			continue
-		}
+		println("Cell params: r, c, type", r, c, report.Sheets[s].Cell(r, c).Type())
 
-		if val, err := strconv.ParseInt(str, 10, 64); err == nil {
-			report.Sheets[s].Cell(r, c).SetInt64(val)
-			report.Sheets[s].Cell(r, c).NumFmt = numberFormat
-			continue
-		}
-
-		if report.Sheets[s].Cell(r, c).Type() == xlsx.CellTypeDate {
-			println("date type cell")
-			//report.Sheets[0].Cell(r, c).SetDate(time.Now())
-			continue
-		}
-
-		report.Sheets[s].Cell(r, c).SetString(str)
+		_ = setValue(report, s, r, c, str)
 
 		/*
 			//style := report.Sheets[0].Cell(r, c).Set
@@ -282,8 +313,66 @@ func (t *Template) renderStatic(report *xlsx.File, data interface{}) error {
 	return nil
 }
 
-func parseRangeLine(s string, m map[int]string) {
+func setValue(report *xlsx.File, s, r, c int, str string) error {
 
+	numberFormat := report.Sheets[s].Cell(r, c).GetNumberFormat()
+	println("cell format: ", numberFormat)
+	if val, err := strconv.ParseFloat(str, 10); err == nil {
+		report.Sheets[s].Cell(r, c).SetFloat(val)
+		report.Sheets[s].Cell(r, c).NumFmt = numberFormat
+		return nil
+	}
+
+	if val, err := strconv.ParseInt(str, 10, 64); err == nil {
+		report.Sheets[s].Cell(r, c).SetInt64(val)
+		report.Sheets[s].Cell(r, c).NumFmt = numberFormat
+		return nil
+	}
+
+	if report.Sheets[s].Cell(r, c).Type() == xlsx.CellTypeDate {
+		println("date type cell")
+		//report.Sheets[0].Cell(r, c).SetDate(time.Now())
+		return nil
+	}
+
+	report.Sheets[s].Cell(r, c).SetString(str)
+
+	return nil
+}
+
+func parseRangeLine(s string) map[int]string {
+
+	m := make(map[int]string)
+	p := 0
+	println("parseRangeLine(", s, ")")
+
+	for {
+		ib := strings.Index(s, "<<")
+		if ib < 0 {
+			// больше нет
+			break
+		}
+
+		ie := strings.Index(s, ">>")
+
+		println("<<", s[ib+2:ie], ">>")
+		c, err := strconv.Atoi(s[ib+2 : ie])
+		if err != nil {
+			panic(err)
+		}
+
+		m[c] = s[:ib]
+
+		s = s[ie+2:]
+
+		p++
+		if p > 5 {
+			break
+		}
+
+	}
+
+	return m
 }
 
 // extractSRC takes string like "1:4:5" and extracts values
@@ -402,8 +491,23 @@ func insertRows(f *xlsx.File, toS, startR, cnt int, row *xlsx.Row) error {
 		return errors.New("invalid starting row in scheet")
 	}
 
+	// делаем глубокое копирование строк. То есть создаем несколько глубоких копий
+	// row в количестве cnt.
 	for i := 0; i < cnt; i++ {
-		(*f).Sheets[toS].Rows = append(f.Sheets[toS].Rows[0:startR], append([]*xlsx.Row{row}, (*f).Sheets[toS].Rows[startR:]...)...)
+
+		nrow := new(xlsx.Row)
+		*nrow = *row
+		nrow.Sheet = f.Sheets[toS]
+		nrow.Cells = make([]*xlsx.Cell, len(row.Cells))
+
+		for c := range nrow.Cells {
+			nrow.Cells[c] = new(xlsx.Cell)
+			*nrow.Cells[c] = *row.Cells[c]
+			nrow.Cells[c].Row = nrow
+		}
+
+		(*f).Sheets[toS].Rows = append(f.Sheets[toS].Rows[0:startR], append([]*xlsx.Row{nrow}, (*f).Sheets[toS].Rows[startR:]...)...)
+
 	}
 
 	return nil
