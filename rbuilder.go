@@ -366,10 +366,6 @@ func parseRangeLine(s string) map[int]string {
 		s = s[ie+2:]
 
 		p++
-		if p > 5 {
-			break
-		}
-
 	}
 
 	return m
