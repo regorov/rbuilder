@@ -24,6 +24,18 @@ func NewTemplate(tmpl *xlsx.File, staticData interface{}) Template {
 	return Template{tmpl: tmpl, staticData: staticData}
 }
 
+var funcMap = template.FuncMap{
+
+	"fdate": func(s string, t time.Time) string { return t.Format(s) },
+	"nfmt": func(val int, base int) float64 {
+		return float64(val) / float64(base)
+		/*z := len(strconv.Itoa(base)) - 1
+		f := "%." + fmt.Sprintf("%d", z) + "f"
+
+		return fmt.Sprintf(f, float64(val)/float64(base))*/
+	},
+}
+
 // Render generates report based on template. Returns new object xlsx what
 // inherits template with values instead of text/template placeholders.
 func (t *Template) Render(data interface{}) (*xlsx.File, error) {
@@ -86,11 +98,6 @@ func (t *Template) renderRange(report *xlsx.File, data interface{}) error {
 	}
 
 	// Done. variable tags holds information about ranges.
-
-	funcMap := template.FuncMap{
-
-		"fdate": func(s string, t time.Time) string { return t.Format(s) },
-	}
 
 	debugf("%s\n", tags)
 
@@ -258,7 +265,7 @@ func (t *Template) renderStatic(report *xlsx.File, data interface{}) error {
 
 	debugf("Static tags positions:\n %s", tags)
 
-	tmp := template.Must(template.New("report").Parse(tags))
+	tmp := template.Must(template.New("report").Funcs(funcMap).Parse(tags))
 
 	buf := bytes.NewBuffer(nil)
 
