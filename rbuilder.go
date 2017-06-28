@@ -24,15 +24,28 @@ func NewTemplate(tmpl *xlsx.File, staticData interface{}) Template {
 	return Template{tmpl: tmpl, staticData: staticData}
 }
 
+func AwayFromZero(v float64, decimals int) float64 {
+	var pow float64 = 1
+	for i := 0; i < decimals; i++ {
+		pow *= 10
+	}
+	if v < 0 {
+		return float64(int((v*pow)-0.5)) / pow
+	}
+	return float64(int((v*pow)+0.5)) / pow
+}
+
 var funcMap = template.FuncMap{
 
 	"fdate": func(s string, t time.Time) string { return t.Format(s) },
 	"nfmt": func(val int, base int) float64 {
 		return float64(val) / float64(base)
-		/*z := len(strconv.Itoa(base)) - 1
-		f := "%." + fmt.Sprintf("%d", z) + "f"
-
-		return fmt.Sprintf(f, float64(val)/float64(base))*/
+	},
+	"toMeters": func(val int) string {
+		return fmt.Sprintf("%0.2f", AwayFromZero(float64(val)/1000.00, 2))
+	},
+	"toTonnes": func(val int) string {
+		return fmt.Sprintf("%0.3f", AwayFromZero(float64(val)/1000.00, 3))
 	},
 }
 
@@ -54,7 +67,10 @@ func (t *Template) Render(data interface{}) (*xlsx.File, error) {
 
 	// render static template values {{.Attr}}, what does not
 	// change amount of lines in result file
-	t.renderStatic(result, data)
+	err = t.renderStatic(result, data)
+	if err != nil {
+		return nil, err
+	}
 
 	// render {{range }}{{end}} what changes amount of line.
 	err = t.renderRange(result, data)
