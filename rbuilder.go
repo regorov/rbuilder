@@ -721,7 +721,7 @@ func ReplaceVariableName(s *xlsx.Sheet, from, to string) {
 
 			if strings.Contains(val, from) {
 				s.Rows[r].Cells[c].SetString(strings.Replace(val, from, to, -1))
-				k, _ := s.Rows[r].Cells[c].String()
+				k := s.Rows[r].Cells[c].String()
 				println("rename", val, strings.Replace(val, from, to, -1), "result", k)
 			}
 		}
