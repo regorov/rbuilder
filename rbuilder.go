@@ -16,12 +16,12 @@ import (
 const debug bool = true
 
 type Template struct {
-	tmpl       *xlsx.File
+	*xlsx.File
 	staticData interface{}
 }
 
 func NewTemplate(tmpl *xlsx.File, staticData interface{}) Template {
-	return Template{tmpl: tmpl, staticData: staticData}
+	return Template{File: tmpl, staticData: staticData}
 }
 
 func AwayFromZero(v float64, decimals int) float64 {
@@ -47,6 +47,12 @@ var funcMap = template.FuncMap{
 	"toTonnes": func(val int) string {
 		return fmt.Sprintf("%0.3f", AwayFromZero(float64(val)/1000.00, 3))
 	},
+	"toKMeters": func(val int) string {
+		return fmt.Sprintf("%0.3f", AwayFromZero(float64(val)/1000000.00, 3))
+	},
+	"toRubles": func(val int) string {
+		return fmt.Sprintf("%0.2f", AwayFromZero(float64(val)/100.00, 2))
+	},
 }
 
 // Render generates report based on template. Returns new object xlsx what
@@ -55,7 +61,7 @@ func (t *Template) Render(data interface{}) (*xlsx.File, error) {
 
 	// create template copy
 	buf := bytes.NewBuffer(nil)
-	err := t.tmpl.Write(buf)
+	err := t.Write(buf)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +97,7 @@ func (t *Template) renderRange(report *xlsx.File, data interface{}) error {
 
 					if strings.Contains(val, "range") {
 						// добавляем заголовок блока range
-						tags = tags + fmt.Sprintf("##begin:%d%s", r, tagSeparator)
+						tags = tags + fmt.Sprintf("##begin:%d/%d%s", s, r, tagSeparator)
 					}
 
 					if strings.Contains(val, "{{end.}}") {
@@ -147,7 +153,7 @@ func (t *Template) renderRange(report *xlsx.File, data interface{}) error {
 	// между строками обозначающими начало и конец блока ##begin:N... ##end
 
 	i := 0
-	offset := 0
+	offset := make(map[int]int, 0)
 	for ; i < len(lines); i++ {
 
 		debugf("%s\n", lines[i])
@@ -156,13 +162,23 @@ func (t *Template) renderRange(report *xlsx.File, data interface{}) error {
 		}
 
 		// найдено начало блока ##begin:N
-		// rangeRowNum хранит номер строки из шаблона где находится {{range}}{{end}}
-		rangeRowNum, err := strconv.Atoi(lines[i][8:])
+		// rangeRowNum хранит номер листа/строки из шаблона где находится {{range}}...{{end}}
+
+		tmp := strings.Split(lines[i][8:], "/")
+
+		// в s номер листа
+		s, err := strconv.Atoi(tmp[0])
 		if err != nil {
 			return err
 		}
 
-		rangeRowNum += offset
+		// в rangeRowNum номер строки
+		rangeRowNum, err := strconv.Atoi(tmp[1])
+		if err != nil {
+			return err
+		}
+
+		rangeRowNum += offset[s]
 
 		// теперь двигаемся до ближайшей строки ##end
 		// cnt - количество строк в блоке в результате генерации блока {{range}}{{end}}
@@ -180,13 +196,13 @@ func (t *Template) renderRange(report *xlsx.File, data interface{}) error {
 			// если генерация {{range}}{{end}} дала ноль записей, то есть после
 			// строчки ##begin:N следующей сразу ##end, тогда необходимо из формируемого excel файла
 			// удалить строчку содержащую тэги {{range}}{{end}}
-			debugf("del row: %d, offset:%d\n", rangeRowNum, offset)
+			debugf("del row: %d, offset:%d\n", rangeRowNum, offset[s])
 			// значит надо удалить строчку с {{range}}
-			err = delRow(report, 0, rangeRowNum+offset)
+			err = delRow(report, 0, rangeRowNum+offset[s])
 			if err != nil {
 				return err
 			}
-			offset--
+			offset[s]--
 
 			// переходим к обработке следующего блока ##begin:N...##end
 			continue
@@ -198,11 +214,11 @@ func (t *Template) renderRange(report *xlsx.File, data interface{}) error {
 		// {{range}}{{end}} больше нуля, то копируем все строки до начала
 		// строки {{range}}{{end}}, потому что если не будет данных
 		// нам не надо создавать пустую строчку без данных
-		if err := insertRows(report, 0, rangeRowNum+offset, cnt-1, report.Sheets[0].Rows[rangeRowNum+offset]); err != nil {
+		if err := insertRows(report, report.Sheets[s], rangeRowNum+offset[s], cnt-1, report.Sheets[s].Rows[rangeRowNum+offset[s]]); err != nil {
 			return err
 		}
 
-		offset += cnt - 1
+		offset[s] += cnt - 1
 
 		// теперь необходимо в каждой вставленной строке, заменить ячейки
 		// данными которые находятся между ##begin:N...##end
@@ -215,7 +231,7 @@ func (t *Template) renderRange(report *xlsx.File, data interface{}) error {
 			fmt.Printf("%v, rangeRowNum=%d\n", cval, rangeRowNum)
 
 			for c, str := range cval {
-				setValue(report, 0, rangeRowNum+l, c, str)
+				setValue(report, s, rangeRowNum+l, c, str)
 			}
 			l++
 
@@ -242,7 +258,11 @@ func (t *Template) renderRange(report *xlsx.File, data interface{}) error {
 
 	}
 
-	return err
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 const tagSeparator = "$$^~^$$"
@@ -470,6 +490,18 @@ func appendRows(from, to *xlsx.File, fromS, fromR, toR, toS int) error {
 		(*to).Sheets[toS].Rows[i].Sheet = to.Sheets[toS]
 	}
 
+	buf := bytes.NewBuffer(nil)
+	if err := to.Write(buf); err != nil {
+		return err
+	}
+
+	to1, err := xlsx.OpenBinary(buf.Bytes())
+	if err != nil {
+		return err
+	}
+
+	*to = *to1
+
 	return nil
 }
 
@@ -492,7 +524,7 @@ func delRow(f *xlsx.File, s, r int) error {
 	return nil
 }
 
-func insertRows(f *xlsx.File, toS, startR, cnt int, row *xlsx.Row) error {
+func insertRowsOld(f *xlsx.File, toS, startR, cnt int, row *xlsx.Row) error {
 
 	if f == nil {
 		return errors.New("invalid file")
@@ -512,7 +544,31 @@ func insertRows(f *xlsx.File, toS, startR, cnt int, row *xlsx.Row) error {
 
 	// делаем глубокое копирование строк. То есть создаем несколько глубоких копий
 	// row в количестве cnt.
+
+	nrows := make([]xlsx.Row, 0)
 	for i := 0; i < cnt; i++ {
+
+		nrows = append(nrows, *row)
+		nrow := &nrows[len(nrows)-1]
+		nrow.Sheet = f.Sheets[toS]
+		nrow.Cells = nil
+
+		for c := range row.Cells {
+			println("row", i, "cell", c, "Cell.style.NamedStyleIndex", row.Cells[c].GetStyle().NamedStyleIndex)
+			cell := nrow.AddCell()
+			//style := new(xlsx.Style)
+			*cell = *row.Cells[c]
+			//*style = *from.Rows[i].Cells[c].GetStyle()
+			cell.Row = nrow
+			//cell.SetStyle(style)
+			nrow.Cells = append(nrow.Cells, cell)
+
+		}
+
+		// (*f).Sheets[toS].Rows = append(f.Sheets[toS].Rows[0:startR], append([]*xlsx.Row{nrow}, (*f).Sheets[toS].Rows[startR:]...)...)
+	}
+
+	/*for i := 0; i < cnt; i++ {
 
 		nrow := new(xlsx.Row)
 		*nrow = *row
@@ -525,9 +581,194 @@ func insertRows(f *xlsx.File, toS, startR, cnt int, row *xlsx.Row) error {
 			nrow.Cells[c].Row = nrow
 		}
 
-		(*f).Sheets[toS].Rows = append(f.Sheets[toS].Rows[0:startR], append([]*xlsx.Row{nrow}, (*f).Sheets[toS].Rows[startR:]...)...)
+		nrows = append(nrows, *nrow)
+		// (*f).Sheets[toS].Rows = append(f.Sheets[toS].Rows[0:startR], append([]*xlsx.Row{nrow}, (*f).Sheets[toS].Rows[startR:]...)...)
+	}*/
+
+	rows := f.Sheets[toS].Rows[0:startR]
+	for i := range nrows {
+		rows = append(rows, &nrows[i])
+	}
+
+	rows = append(rows, f.Sheets[toS].Rows[startR:]...)
+
+	(*f).Sheets[toS].Rows = rows
+
+	buf := bytes.NewBuffer(nil)
+	if err := f.Write(buf); err != nil {
+		return err
+	}
+
+	f1, err := xlsx.OpenBinary(buf.Bytes())
+	if err != nil {
+		return err
+	}
+
+	*f = *f1
+
+	return nil
+}
+
+/*func CloneSheet(f *xlsx.File, idx int) error {
+
+	if idx >= len(f.Sheets) {
+		return errors.New("CopySheet(): Invalid sheet index!")
+	}
+
+	// получаем в отдельный объект содержимое листа
+	s, err := f.AddSheet("0")
+	if err != nil {
+		return err
+	}
+
+	*s = *(f.Sheets[idx])
+	s.Cols = nil
+	s.Rows = nil
+
+	s.SheetViews = make([]xlsx.SheetView, len(f.Sheets[idx].SheetViews))
+	for i := range s.SheetViews {
+		s.SheetViews[i] = f.Sheets[idx].SheetViews[i]
+	}
+
+	// пока s.Rows, s.Cols это указатели на строки исходного листа
+	// надо их пересоздать
+
+	if err = CloneRows(f.Sheets[idx], s, 0, len(f.Sheets[idx].Rows)); err != nil {
+		return err
+	}
+
+	return nil
+}
+*/
+
+func CloneRows(from, to *xlsx.Sheet, start, end int) error {
+
+	for i := range from.Rows[start:end] {
+		row := new(xlsx.Row)
+		*row = *from.Rows[i]
+		row.Sheet = to
+		row.Cells = nil
+
+		for c := range from.Rows[i].Cells {
+			println("row", i, "cell", c, "Cell.style.NamedStyleIndex", from.Rows[i].Cells[c].GetStyle().NamedStyleIndex)
+			cell := row.AddCell()
+			//style := new(xlsx.Style)
+			*cell = *from.Rows[i].Cells[c]
+			//*style = *from.Rows[i].Cells[c].GetStyle()
+			//cell.Row = row
+			//cell.SetStyle(style)
+			//row.Cells = append(row.Cells, cell)
+
+		}
+
+		to.Rows = append(to.Rows, row)
+	}
+
+	for i := range from.Cols {
+		col := new(xlsx.Col)
+		*col = *from.Cols[i]
+		//style := new(xlsx.Style)
+		//*style = *from.Cols[i].GetStyle()
+		//col.SetStyle(style)
+		to.Cols = append(to.Cols, col)
+	}
+
+	return nil
+}
+
+// CloneSheet копирует лист as/is, присваивая новому листу имя name и производя
+// замену наименований переменных-плейсхолдеров с {{.D.Dyn.Name}} на {{.D.Dyn0.Name}}
+func CloneSheet(t *xlsx.File, idx int, name string, varFrom, varTo string) error {
+
+	if idx > len(t.Sheets) {
+		return errors.New("Недопустимый номер листа!")
+	}
+
+	_, err := t.AppendSheet(*t.Sheets[idx], name)
+	if err != nil {
+		return err
+	}
+
+	buf := bytes.NewBuffer(nil)
+	if err = t.Write(buf); err != nil {
+		return err
+	}
+
+	t1, err := xlsx.OpenBinary(buf.Bytes())
+	if err != nil {
+		return err
+	}
+
+	ReplaceVariableName(t1.Sheets[len(t1.Sheets)-1], varFrom, varTo)
+
+	*t = *t1
+	return nil
+}
+
+func ReplaceVariableName(s *xlsx.Sheet, from, to string) {
+
+	from = "." + from
+	to = "." + to
+	for r := range s.Rows {
+		for c := range s.Rows[r].Cells {
+			val := s.Rows[r].Cells[c].Value
+			if val == "" {
+				continue
+			}
+			if !(strings.Contains(val, "{{") && strings.Contains(val, "}}")) {
+				continue
+			}
+
+			if strings.Contains(val, from) {
+				s.Rows[r].Cells[c].SetString(strings.Replace(val, from, to, -1))
+				k, _ := s.Rows[r].Cells[c].String()
+				println("rename", val, strings.Replace(val, from, to, -1), "result", k)
+			}
+		}
+	}
+}
+
+func insertRows(f *xlsx.File, s *xlsx.Sheet, startR, cnt int, row *xlsx.Row) error {
+
+	println("sheets", len(f.Sheets), "start", startR, "cnt", cnt)
+
+	// делаем глубокое копирование строк. То есть создаем несколько глубоких копий
+	// row в количестве cnt.
+	nrows := make([]*xlsx.Row, 0)
+	for i := 0; i < cnt; i++ {
+
+		nrow := new(xlsx.Row)
+		*nrow = *row
+		nrow.Sheet = s
+		nrow.Cells = nil
+
+		for c := range row.Cells {
+			println("row", i, "cell", c, "Cell.style.NamedStyleIndex", row.Cells[c].GetStyle().NamedStyleIndex)
+			cell := nrow.AddCell()
+			//style := new(xlsx.Style)
+			*cell = *row.Cells[c]
+			//*style = *from.Rows[i].Cells[c].GetStyle()
+			(*cell).Row = nrow
+			//cell.SetStyle(style)
+		}
+
+		(*s).Rows = append(s.Rows[0:startR], append([]*xlsx.Row{nrow}, (*s).Rows[startR:]...)...)
 
 	}
+
+	println("len(nrows)", len(nrows))
+
+	buf := bytes.NewBuffer(nil)
+	if err := f.Write(buf); err != nil {
+		return err
+	}
+
+	f1, err := xlsx.OpenBinary(buf.Bytes())
+	if err != nil {
+		return err
+	}
+
+	*f = *f1
 
 	return nil
 }
