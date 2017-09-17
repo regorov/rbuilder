@@ -360,6 +360,12 @@ func setValue(report *xlsx.File, s, r, c int, str string) error {
 
 	numberFormat := report.Sheets[s].Cell(r, c).GetNumberFormat()
 	println("cell format: ", numberFormat)
+
+	if numberFormat == "@" {
+		report.Sheets[s].Cell(r, c).SetString(str)
+		return nil
+	}
+
 	if val, err := strconv.ParseFloat(str, 10); err == nil {
 		report.Sheets[s].Cell(r, c).SetFloat(val)
 		report.Sheets[s].Cell(r, c).NumFmt = numberFormat
